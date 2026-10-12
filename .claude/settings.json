@@ -1,0 +1,56 @@
+{
+  "agent": "orchestrator",
+  "env": {
+    "ALLOWED_GPU": "1",
+    "HIP_VISIBLE_DEVICES": "1",
+    "VLLM_ROCM_USE_AITER": "0",
+    "USE_ROCM_AITER_ROPE_BACKEND": "0"
+  },
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(ops/stack.sh:*)",
+      "Bash(bash ops/:*)",
+      "Bash(python3 ops/:*)",
+      "Bash(uv run:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv pip:*)",
+      "Bash(npm run:*)",
+      "Bash(npm install:*)",
+      "Bash(npm test:*)",
+      "Bash(npx:*)",
+      "Bash(curl:*)",
+      "Bash(rocm-smi:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(ls:*)",
+      "Bash(tail:*)",
+      "Bash(head:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(pgrep:*)",
+      "Bash(ss:*)",
+      "mcp__playwright"
+    ],
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(docker:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/gpu_guard.py"
+          }
+        ]
+      }
+    ]
+  }
+}

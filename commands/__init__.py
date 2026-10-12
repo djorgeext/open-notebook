@@ -16,6 +16,9 @@ from .embedding_commands import (
 )
 from .podcast_commands import generate_podcast_command
 from .source_commands import process_source_command
+from .worker_startup import fail_orphaned_jobs_on_worker_start
+
+fail_orphaned_jobs_on_worker_start()
 
 __all__ = [
     # Embedding commands

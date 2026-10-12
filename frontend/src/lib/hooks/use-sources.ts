@@ -246,6 +246,10 @@ export function useSourceStatus(sourceId: string, enabled = true) {
       // No auto-refresh if completed, failed, or unknown
       return false
     },
+    // Keep polling while the tab is hidden (user waits in another window) and
+    // re-check on focus, so a finished job never leaves the card spinning.
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
     staleTime: 0, // Always consider status data stale for real-time updates
     retry: (failureCount, error) => {
       // Don't retry on 404 (source not found)
@@ -255,6 +259,9 @@ export function useSourceStatus(sourceId: string, enabled = true) {
       }
       return failureCount < 3
     },
+    // Short fixed delay: a failed/timed-out poll is retried quickly. After the
+    // retries the query keeps its last data, so the interval keeps polling.
+    retryDelay: 2000,
   })
 }
 

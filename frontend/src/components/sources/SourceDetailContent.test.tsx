@@ -5,6 +5,7 @@ import { SourceDetailContent } from './SourceDetailContent'
 import { sourcesApi } from '@/lib/api/sources'
 import { insightsApi } from '@/lib/api/insights'
 import { transformationsApi } from '@/lib/api/transformations'
+import { embeddingApi } from '@/lib/api/embedding'
 import { QUERY_KEYS } from '@/lib/api/query-client'
 import { SourceDetailResponse } from '@/lib/types/api'
 import { toast } from 'sonner'
@@ -33,7 +34,7 @@ vi.mock('@/lib/api/transformations', () => ({
 
 vi.mock('@/lib/api/embedding', () => ({
   embeddingApi: {
-    embedSource: vi.fn(),
+    embedContent: vi.fn(),
   },
 }))
 
@@ -80,6 +81,7 @@ const mockListInsights = vi.mocked(insightsApi.listForSource)
 const mockCreateInsight = vi.mocked(insightsApi.create)
 const mockWaitForCommand = vi.mocked(insightsApi.waitForCommand)
 const mockListTransformations = vi.mocked(transformationsApi.list)
+const mockEmbedContent = vi.mocked(embeddingApi.embedContent)
 
 const notFoundError = Object.assign(new Error('Request failed with status code 404'), {
   isAxiosError: true,
@@ -291,5 +293,110 @@ describe('SourceDetailContent', () => {
     await act(async () => resolveRefresh([]))
 
     expect(toast.error).not.toHaveBeenCalledWith('Stale failure')
+  })
+
+  describe('embed content', () => {
+    const embedButton = () => screen.getByRole('button', { name: /sources\.(embedContent|embedding)$/ })
+
+    beforeEach(() => {
+      mockSourcesGet.mockResolvedValue(loadedSource)
+      mockEmbedContent.mockResolvedValue({
+        success: true,
+        message: 'Source embedding job submitted',
+        command_id: 'command:embed-1',
+      })
+    })
+
+    it('polls the job, shows the error and re-enables the button when embedding fails', async () => {
+      let resolveWait!: (value: Awaited<ReturnType<typeof insightsApi.waitForCommand>>) => void
+      mockWaitForCommand.mockReturnValue(new Promise(resolve => {
+        resolveWait = resolve
+      }))
+
+      renderContent(undefined, loadedSource.id)
+      await screen.findByText('sources.notEmbeddedAlert')
+      fireEvent.click(embedButton())
+
+      await waitFor(() => {
+        expect(mockWaitForCommand).toHaveBeenCalledWith(
+          'command:embed-1',
+          expect.objectContaining({ intervalMs: 3000 })
+        )
+      })
+      expect(toast.success).toHaveBeenCalledWith('sources.embeddingStarted')
+      expect(embedButton()).toBeDisabled()
+
+      await act(async () => {
+        resolveWait({ job_id: 'command:embed-1', status: 'failed', error_message: 'boom' })
+      })
+
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith('boom'))
+      await waitFor(() => expect(embedButton()).toBeEnabled())
+    })
+
+    it('treats a completed job with success=false as a failure', async () => {
+      mockWaitForCommand.mockResolvedValue({
+        job_id: 'command:embed-1',
+        status: 'completed',
+        result: { success: false, error_message: 'Source has no text to embed' },
+      })
+
+      renderContent(undefined, loadedSource.id)
+      await screen.findByText('sources.notEmbeddedAlert')
+      fireEvent.click(embedButton())
+
+      await waitFor(() => {
+        expect(toast.error).toHaveBeenCalledWith('Source has no text to embed')
+      })
+      expect(toast.success).not.toHaveBeenCalledWith('sources.embeddingDone')
+    })
+
+    it('refetches the source and reports success when the job completes', async () => {
+      mockWaitForCommand.mockResolvedValue({
+        job_id: 'command:embed-1',
+        status: 'completed',
+        result: { success: true, chunks_created: 3 },
+      })
+
+      renderContent(undefined, loadedSource.id)
+      await screen.findByText('sources.notEmbeddedAlert')
+      const callsBefore = mockSourcesGet.mock.calls.length
+      fireEvent.click(embedButton())
+
+      await waitFor(() => expect(toast.success).toHaveBeenCalledWith('sources.embeddingDone'))
+      expect(mockSourcesGet.mock.calls.length).toBeGreaterThan(callsBefore)
+      expect(toast.error).not.toHaveBeenCalled()
+    })
+
+    it('resumes a running embed job on load and keeps the button disabled', async () => {
+      mockSourcesGet
+        .mockResolvedValueOnce({ ...loadedSource, embed_command_id: 'command:running' })
+        .mockResolvedValue({ ...loadedSource, embedded: true, embedded_chunks: 3 })
+      let resolveWait!: (value: Awaited<ReturnType<typeof insightsApi.waitForCommand>>) => void
+      mockWaitForCommand.mockReturnValue(new Promise(resolve => {
+        resolveWait = resolve
+      }))
+
+      renderContent(undefined, loadedSource.id)
+      await screen.findByText('sources.notEmbeddedAlert')
+
+      await waitFor(() => {
+        expect(mockWaitForCommand).toHaveBeenCalledWith(
+          'command:running',
+          expect.objectContaining({ intervalMs: 3000 })
+        )
+      })
+      expect(embedButton()).toBeDisabled()
+      expect(embedButton()).toHaveTextContent('sources.embedding')
+      expect(mockEmbedContent).not.toHaveBeenCalled()
+      expect(mockWaitForCommand).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        resolveWait({ job_id: 'command:running', status: 'completed', result: { success: true } })
+      })
+
+      await waitFor(() => expect(toast.success).toHaveBeenCalledWith('sources.embeddingDone'))
+      await waitFor(() => expect(screen.queryByText('sources.notEmbeddedAlert')).not.toBeInTheDocument())
+    })
   })
 })

@@ -387,9 +387,16 @@ class TestSourceDomain:
     async def test_vectorize_submits_command_with_valid_text(self):
         """Test that vectorize() submits embed_source command when text is valid."""
         source = Source(id="source:test_valid", title="Test", full_text="Real content")
-        with patch(
-            "open_notebook.domain.notebook.submit_command", return_value="command:123"
-        ) as mock_submit:
+        with (
+            patch(
+                "open_notebook.domain.notebook.repo_query",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "open_notebook.domain.notebook.submit_command",
+                return_value="command:123",
+            ) as mock_submit,
+        ):
             result = await source.vectorize()
             mock_submit.assert_called_once_with(
                 "open_notebook",
@@ -397,6 +404,31 @@ class TestSourceDomain:
                 {"source_id": "source:test_valid"},
             )
             assert result == "command:123"
+
+    @pytest.mark.asyncio
+    async def test_vectorize_returns_active_job_instead_of_duplicate(self):
+        """A queued/running embed_source job for the source is reused."""
+        source = Source(id="source:test_busy", title="Test", full_text="Real content")
+        mock_query = AsyncMock(return_value=["command:running1"])
+        with (
+            patch("open_notebook.domain.notebook.repo_query", new=mock_query),
+            patch("open_notebook.domain.notebook.submit_command") as mock_submit,
+        ):
+            result = await source.vectorize()
+        assert result == "command:running1"
+        mock_submit.assert_not_called()
+        query, params = mock_query.call_args.args
+        assert "status IN ['new', 'running']" in query
+        assert params == {"source_id": "source:test_busy"}
+
+    @pytest.mark.asyncio
+    async def test_active_embed_lookup_failure_means_no_active_job(self):
+        source = Source(id="source:test_err", title="Test", full_text="x")
+        with patch(
+            "open_notebook.domain.notebook.repo_query",
+            new=AsyncMock(side_effect=RuntimeError("db down")),
+        ):
+            assert await source.get_active_embed_command() is None
 
 
 # ============================================================================

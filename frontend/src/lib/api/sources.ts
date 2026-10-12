@@ -12,6 +12,8 @@ import {
 
 export type SourceSortField = 'type' | 'title' | 'created' | 'updated' | 'insights_count' | 'embedded'
 
+export const SOURCE_STATUS_TIMEOUT_MS = 15000
+
 export const sourcesApi = {
   list: async (params?: {
     notebook_id?: string
@@ -78,7 +80,11 @@ export const sourcesApi = {
   },
 
   status: async (id: string) => {
-    const response = await apiClient.get<SourceStatusResponse>(`/sources/${id}/status`)
+    // Short timeout: a stalled status poll must fail fast so the next poll runs.
+    // With the 10-minute client default one hung request froze the card (F0d).
+    const response = await apiClient.get<SourceStatusResponse>(`/sources/${id}/status`, {
+      timeout: SOURCE_STATUS_TIMEOUT_MS,
+    })
     return response.data
   },
 

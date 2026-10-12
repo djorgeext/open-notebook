@@ -134,6 +134,9 @@ specs/
 .claude/*
 !.claude/skills
 !.claude/agents
+!.claude/hooks
+!.claude/settings.json
+!.claude/RULES.md
 .sisyphus
 
 .playwright-mcp/
@@ -158,3 +161,9 @@ history.txt
 # oss-maintainer local state
 .maintainer/profile.local.toml
 .maintainer/state/
+
+# local stack (ops/)
+.run/
+surreal_data/
+.agents/evidence/
+.playwright-mcp/

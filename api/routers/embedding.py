@@ -44,17 +44,26 @@ async def embed_content(embed_request: EmbedRequest):
 
                 # Submit type-specific command
                 if item_type == "source":
+                    # One embed job per source: returns the active one if any.
+                    command_id, already_active = await Source(
+                        id=item_id
+                    ).submit_embed_job()
+                    if already_active:
+                        return EmbedResponse(
+                            success=True,
+                            message="Embedding already in progress",
+                            item_id=item_id,
+                            item_type=item_type,
+                            command_id=command_id,
+                        )
                     command_name = "embed_source"
-                    command_input = {"source_id": item_id}
                 else:  # note
                     command_name = "embed_note"
-                    command_input = {"note_id": item_id}
-
-                command_id = await CommandService.submit_command_job(
-                    "open_notebook",
-                    command_name,
-                    command_input,
-                )
+                    command_id = await CommandService.submit_command_job(
+                        "open_notebook",
+                        command_name,
+                        {"note_id": item_id},
+                    )
 
                 logger.info(f"Submitted async {command_name} command: {command_id}")
 

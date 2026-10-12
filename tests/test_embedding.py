@@ -157,6 +157,36 @@ class TestGenerateEmbeddings:
             assert result[1] == [0.4, 0.5, 0.6]
             mock_model.aembed.assert_called_once_with(["text1", "text2"])
 
+    @pytest.mark.asyncio
+    async def test_error_message_includes_cause_type(self):
+        """Timeouts often carry empty messages; the error must name the cause type."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        def _raise(*_args, **_kwargs):
+            try:
+                raise TimeoutError()
+            except TimeoutError as exc:
+                raise RuntimeError("Failed to generate embeddings: ") from exc
+
+        mock_model = MagicMock()
+        mock_model.aembed = AsyncMock(side_effect=_raise)
+
+        with (
+            patch(
+                "open_notebook.ai.models.model_manager.get_embedding_model",
+                new_callable=AsyncMock,
+                return_value=mock_model,
+            ),
+            patch("open_notebook.utils.embedding.EMBEDDING_RETRY_DELAY", 0),
+        ):
+            with pytest.raises(RuntimeError) as excinfo:
+                await generate_embeddings(["text1"])
+
+        message = str(excinfo.value)
+        assert "TimeoutError" in message
+        assert "RuntimeError" in message
+        assert mock_model.aembed.await_count == 3
+
 
 # ============================================================================
 # TEST SUITE 3: Generate Single Embedding (requires mocking)

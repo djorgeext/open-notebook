@@ -115,6 +115,7 @@ function SourceDetailContentInner({
   const [insightToDelete, setInsightToDelete] = useState<string | null>(null)
   const [deletingInsight, setDeletingInsight] = useState(false)
   const insightPollingRef = useRef<AbortController | null>(null)
+  const embedPollingRef = useRef<AbortController | null>(null)
 
   // A 404 means the source was deleted (e.g. a dangling chat/ask reference) —
   // handled by the shared "content no longer exists" state. The global query
@@ -159,6 +160,7 @@ function SourceDetailContentInner({
   }, [fetchInsights, fetchTransformations, sourceId])
 
   useEffect(() => () => insightPollingRef.current?.abort(), [])
+  useEffect(() => () => embedPollingRef.current?.abort(), [])
 
   const createInsight = async () => {
     if (!selectedTransformation) {
@@ -272,21 +274,86 @@ function SourceDetailContentInner({
     }
   }
 
-  const handleEmbedContent = async () => {
-    if (!source) return
+  // Track one embed job: keep the button disabled and poll until the job
+  // ends so the user sees the result (or the failure). `startRequest`
+  // submits a new job (or gets the one already running); without it the
+  // given command id is resumed (page opened/reloaded mid-job).
+  const trackEmbedJob = useCallback(async (
+    startRequest: (() => Promise<string | null | undefined>) | null,
+    resumeCommandId?: string,
+  ) => {
+    embedPollingRef.current?.abort()
+    const controller = new AbortController()
+    embedPollingRef.current = controller
+    const finish = () => {
+      if (embedPollingRef.current === controller) {
+        embedPollingRef.current = null
+        setIsEmbedding(false)
+      }
+    }
 
     try {
       setIsEmbedding(true)
-      const response = await embeddingApi.embedContent(sourceId, 'source')
-      toast.success(response.message || t('common.success'))
+      const commandId = startRequest ? await startRequest() : resumeCommandId
+      if (controller.signal.aborted) return
+
+      if (!commandId) {
+        await refetchSource()
+        return
+      }
+
+      const status = await insightsApi.waitForCommand(commandId, {
+        intervalMs: 3000,
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted) return
+
+      // Embed commands catch ValueError and complete with success=false.
+      const result = status?.result as { success?: boolean; error_message?: string } | undefined
+      const succeeded = status?.status === 'completed' && result?.success !== false
+
       await refetchSource()
+      if (controller.signal.aborted) return
+      queryClient.invalidateQueries({ queryKey: ['sources'] })
+
+      if (succeeded) {
+        toast.success(t('sources.embeddingDone'))
+      } else {
+        const message = result?.error_message || status?.error_message || ''
+        toast.error(getApiErrorMessage(message, (key) => t(key), 'sources.embeddingFailed'))
+      }
     } catch (err) {
+      if (controller.signal.aborted) return
       console.error('Failed to embed content:', err)
-      toast.error(t('common.error'))
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      toast.error(getApiErrorMessage(detail ?? '', (key) => t(key), 'sources.embeddingFailed'))
     } finally {
-      setIsEmbedding(false)
+      if (!controller.signal.aborted) finish()
     }
+  }, [queryClient, refetchSource, t])
+
+  const handleEmbedContent = async () => {
+    if (!source) return
+    await trackEmbedJob(async () => {
+      // The API returns the already-running job instead of queuing a duplicate.
+      const response = await embeddingApi.embedContent(sourceId, 'source')
+      if (response.command_id) {
+        toast.success(t('sources.embeddingStarted'))
+      } else {
+        toast.success(response.message || t('common.success'))
+      }
+      return response.command_id
+    })
   }
+
+  // Page opened (or reloaded) while an embed job is queued/running: resume
+  // tracking it so the button stays disabled and the result is reported.
+  const activeEmbedCommandId = source?.embed_command_id
+  useEffect(() => {
+    if (activeEmbedCommandId && !embedPollingRef.current) {
+      void trackEmbedJob(null, activeEmbedCommandId)
+    }
+  }, [activeEmbedCommandId, trackEmbedJob])
 
   const extractFilename = (pathOrUrl: string | undefined, fallback: string) => {
     if (!pathOrUrl) {

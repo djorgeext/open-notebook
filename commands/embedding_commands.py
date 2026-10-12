@@ -15,7 +15,12 @@ from surreal_commands import CommandInput, CommandOutput, command, submit_comman
 
 from open_notebook.ai.models import model_manager
 from open_notebook.database.repository import ensure_record_id, repo_insert, repo_query
-from open_notebook.domain.notebook import Note, Source, SourceInsight
+from open_notebook.domain.notebook import (
+    Note,
+    Source,
+    SourceInsight,
+    get_sources_with_active_embed,
+)
 from open_notebook.exceptions import (
     ConfigurationError,
     ContextLengthExceededError,
@@ -320,11 +325,12 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
 
     Flow:
     1. Load Source by ID
-    2. DELETE existing source_embedding records for this source
+    2. Remember existing source_embedding ids (kept searchable meanwhile)
     3. Detect content type from file path or content
     4. Chunk text using appropriate splitter
     5. Generate embeddings for all chunks in batches
-    6. Bulk INSERT source_embedding records
+    6. Bulk INSERT new source_embedding records
+    7. DELETE the previous records (only after the new set is complete)
 
     Retry Strategy:
     - Retries up to 5 times for transient failures (network, timeout, etc.)
@@ -342,12 +348,16 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
         if not source.full_text or not source.full_text.strip():
             raise ValueError(f"Source '{input_data.source_id}' has no text to embed")
 
-        # 2. DELETE existing embeddings (idempotency)
-        logger.debug(f"Deleting existing embeddings for source {input_data.source_id}")
-        await repo_query(
-            "DELETE source_embedding WHERE source = $source_id",
-            {"source_id": ensure_record_id(input_data.source_id)},
-        )
+        # 2. Remember existing embeddings. They stay searchable until the new
+        # set is written, then get replaced (idempotent under retry).
+        source_rid = ensure_record_id(input_data.source_id)
+        old_ids = [
+            ensure_record_id(str(rid))
+            for rid in await repo_query(
+                "SELECT VALUE id FROM source_embedding WHERE source = $source_id",
+                {"source_id": source_rid},
+            )
+        ]
 
         # 3. Detect content type from file path if available
         file_path = source.asset.file_path if source.asset else None
@@ -398,13 +408,14 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
             await repo_insert("source_embedding", records)
         except Exception:
             # repo_insert writes in batches, so a failure on a later batch
-            # leaves the earlier ones behind. A partial set would mark the
-            # source as embedded while search sees only part of it: remove
-            # them before re-raising (the original error drives retry/stop).
+            # leaves the earlier ones behind. A partial set would mix with
+            # the old one: remove only the new records, keep the old set,
+            # and re-raise (the original error drives retry/stop).
             try:
                 await repo_query(
-                    "DELETE source_embedding WHERE source = $source_id",
-                    {"source_id": ensure_record_id(input_data.source_id)},
+                    "DELETE source_embedding WHERE source = $source_id "
+                    "AND id NOTINSIDE $old_ids",
+                    {"source_id": source_rid, "old_ids": old_ids},
                 )
             except Exception as cleanup_error:
                 logger.error(
@@ -412,6 +423,18 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
                     f"{input_data.source_id}: {cleanup_error}"
                 )
             raise
+
+        # 7. New set is complete: drop the previous one
+        if old_ids:
+            logger.debug(
+                f"Deleting {len(old_ids)} previous embeddings for source "
+                f"{input_data.source_id}"
+            )
+            await repo_query(
+                "DELETE source_embedding WHERE source = $source_id "
+                "AND id INSIDE $old_ids",
+                {"source_id": source_rid, "old_ids": old_ids},
+            )
 
         return {"chunks_created": total_chunks}, f": {total_chunks} chunks"
 
@@ -693,9 +716,19 @@ async def rebuild_embeddings_command(
                 processing_time=time.time() - start_time,
             )
 
+        # Skip sources whose embed job is already queued/running: a second
+        # job would only duplicate the work and block the queue.
+        active_sources = await get_sources_with_active_embed()
+        source_ids = [s for s in items["sources"] if s not in active_sources]
+        if len(source_ids) < len(items["sources"]):
+            logger.info(
+                f"Skipping {len(items['sources']) - len(source_ids)} sources "
+                "with an embed job already in progress"
+            )
+
         # Submit one embedding command per item, per kind
         sources_submitted, sources_failed = _submit_embedding_jobs(
-            "source", "embed_source", "source_id", items["sources"]
+            "source", "embed_source", "source_id", source_ids
         )
         notes_submitted, notes_failed = _submit_embedding_jobs(
             "note", "embed_note", "note_id", items["notes"]

@@ -399,6 +399,8 @@ class SourceResponse(BaseModel):
     command_id: Optional[str] = None
     status: Optional[str] = None
     processing_info: Optional[Dict] = None
+    # Queued/running embed_source job, so the UI can resume tracking it
+    embed_command_id: Optional[str] = None
     # Notebook associations
     notebooks: Optional[List[str]] = None
 

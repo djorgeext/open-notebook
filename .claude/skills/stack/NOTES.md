@@ -1,0 +1,17 @@
+# Env quirks (1 line each, newest bottom)
+- MI210 = gfx90a: AITER off (VLLM_ROCM_USE_AITER=0). No FP8 compute. Keep --enforce-eager.
+- Never set CUDA_VISIBLE_DEVICES or ROCR_VISIBLE_DEVICES with HIP_VISIBLE_DEVICES: double filter → no GPU or wrong GPU.
+- 8000/8001 owned by pdf-rag + nomic vllm (other apps, no kill) → ours surreal 8010, llm 8011.
+- Speaches model download: `POST /v1/models/<id>` works (verified 2026-10-11).
+- speaches pinned commit 993994f7984bf3fe9655b267448328cf66fccb42 (bootstrap 2026-10-11, shallow clone master).
+- surreal installer: no trailing dir arg (default /usr/local/bin); dir arg after --version → 'can't shift'.
+- Speaches need system ffmpeg (TTS mp3 / STT decode) → bootstrap apt install.
+- Speaches onnxruntime-gpu = CUDA → swap CPU onnxruntime; uv pip from / (speaches pyproject override hide onnxruntime on x86_64).
+- ops/*.sh lost +x in checkout → `chmod +x ops/*.sh` (or call via `bash ops/stack.sh`).
+- Web: fresh browser deep link (/settings/models) first bounce to /notebooks (no-auth login flow); goto again → ok.
+- `pgrep -f surreal-commands-worker` = 2 (uv wrapper + python). Real worker = 1.
+- Embed server: torch on 128 cores w/o EMBED_THREADS cap + concurrent requests = thread storm (2400 thr). Keep lock + EMBED_THREADS=16; real 88-chunk source ~280-300s.
+- SurrealDB stale job: `UPDATE command:...` via /sql blocked by auto-mode classifier → ask user, or let worker drain (embed_source idempotent).
+- Stale command fix (user ok): curl -XPOST 127.0.0.1:8010/sql -u user:pw -H 'surreal-ns: open_notebook' -H 'surreal-db: open_notebook' -H 'Accept: application/json' -d "UPDATE command:<id> SET status='failed', error_message='stale';" (command table has name/args/status; no created in SELECT * OMIT result).
+- Worker start runs commands/worker_startup.py: embed_source jobs left 'running' -> failed (log 'Marked N embed_source job(s)'). Manual UPDATE no longer needed after worker restart.
+- Embed EMBED_THREADS=32 (F0d); GPU embed rejected: needs LLM_GPU_UTIL ≤0.87.

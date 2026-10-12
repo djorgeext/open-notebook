@@ -1,4 +1,6 @@
+import asyncio
 import os
+import weakref
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
@@ -15,6 +17,57 @@ from open_notebook.exceptions import (
     InvalidInputError,
     NotFoundError,
 )
+
+# Serializes "is an embed_source job active? else submit one" so parallel
+# POST /api/embed calls for one source queue a single job. One lock per event
+# loop (asyncio locks are loop-bound); assumes one API process, the default.
+_embed_submit_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _embed_submit_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _embed_submit_locks.get(loop)
+    if lock is None:
+        lock = _embed_submit_locks[loop] = asyncio.Lock()
+    return lock
+
+
+async def get_sources_with_active_embed() -> set[str]:
+    """Source ids that already have a queued/running embed_source job."""
+    try:
+        result = await repo_query(
+            """
+            SELECT VALUE args.source_id FROM command
+            WHERE app = 'open_notebook' AND name = 'embed_source'
+            AND status IN ['new', 'running']
+            """
+        )
+        return {str(r) for r in result if r}
+    except Exception as e:
+        logger.warning(f"Failed to look up active embed jobs: {e}")
+        return set()
+
+
+async def fail_orphaned_embed_jobs() -> List[str]:
+    """Mark embed_source jobs left 'running' by a dead worker as failed.
+
+    surreal-commands only picks up 'new' jobs when a worker starts and never
+    reclaims 'running' ones, so a job whose worker was restarted or crashed
+    stays 'running' forever and locks its source (one embed job per source).
+    Call this at worker startup, before the worker takes jobs: with the single
+    worker process Open Notebook runs, every 'running' job then is an orphan.
+    """
+    result = await repo_query(
+        """
+        UPDATE command SET
+            status = 'failed',
+            error_message = 'Worker restarted while this job was running. Embed again.'
+        WHERE app = 'open_notebook' AND name = 'embed_source'
+        AND status = 'running'
+        RETURN VALUE id
+        """
+    )
+    return [str(r) for r in result]
 
 
 class Notebook(ObjectModel):
@@ -535,6 +588,62 @@ class Source(ObjectModel):
         await Notebook.get(notebook_id)  # raises NotFoundError if invalid/missing
         return await self.relate("reference", notebook_id)
 
+    async def get_active_embed_command(self) -> Optional[str]:
+        """Return the id of a queued/running embed_source job for this source.
+
+        Returns None when there is none, or when the lookup fails (callers
+        treat "unknown" like "no active job").
+        """
+        if not self.id:
+            return None
+        try:
+            result = await repo_query(
+                """
+                SELECT VALUE id FROM command
+                WHERE app = 'open_notebook' AND name = 'embed_source'
+                AND args.source_id = $source_id
+                AND status IN ['new', 'running']
+                LIMIT 1
+                """,
+                {"source_id": str(self.id)},
+            )
+            return str(result[0]) if result else None
+        except Exception as e:
+            logger.warning(f"Failed to look up embed job for source {self.id}: {e}")
+            return None
+
+    async def submit_embed_job(self) -> tuple[str, bool]:
+        """Queue an embed_source job unless one is already queued/running.
+
+        One embed job per source at a time: a second click, a page reload
+        mid-job or a parallel request gets the active job. Check + submit run
+        under a lock so concurrent callers can't both see "no job".
+
+        Returns:
+            (command_id, already_active)
+        """
+        async with _embed_submit_lock():
+            active_command_id = await self.get_active_embed_command()
+            if active_command_id:
+                logger.info(
+                    f"Embed source job already active for source {self.id}: "
+                    f"command_id={active_command_id}"
+                )
+                return active_command_id, True
+
+            command_id = str(
+                submit_command(
+                    "open_notebook",
+                    "embed_source",
+                    {"source_id": str(self.id)},
+                )
+            )
+            logger.info(
+                f"Embed source job submitted for source {self.id}: "
+                f"command_id={command_id}"
+            )
+            return command_id, False
+
     async def vectorize(self) -> str:
         """
         Submit vectorization as a background job using the embed_source command.
@@ -559,20 +668,8 @@ class Source(ObjectModel):
             if not self.full_text or not self.full_text.strip():
                 raise ValueError(f"Source {self.id} has no text to vectorize")
 
-            # Submit the embed_source command
-            command_id = submit_command(
-                "open_notebook",
-                "embed_source",
-                {"source_id": str(self.id)},
-            )
-
-            command_id_str = str(command_id)
-            logger.info(
-                f"Embed source job submitted for source {self.id}: "
-                f"command_id={command_id_str}"
-            )
-
-            return command_id_str
+            command_id, _ = await self.submit_embed_job()
+            return command_id
 
         except ValueError:
             raise

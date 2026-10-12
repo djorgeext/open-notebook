@@ -774,6 +774,7 @@ async def get_source(source_id: str):
                 status = "unknown"
 
         embedded_chunks = await source.get_embedded_chunks()
+        embed_command_id = await source.get_active_embed_command()
 
         # Get associated notebooks
         notebooks_query = await repo_query(
@@ -792,6 +793,7 @@ async def get_source(source_id: str):
             command_id=str(source.command) if source.command else None,
             status=status,
             processing_info=processing_info,
+            embed_command_id=embed_command_id,
             # Notebook associations
             notebooks=notebook_ids,
         )

@@ -47,6 +47,26 @@ EMBEDDING_MAX_RETRIES = 3
 EMBEDDING_RETRY_DELAY = 2  # seconds
 
 
+def _describe_error(e: BaseException) -> str:
+    """Readable error text: exception type + message + cause chain types.
+
+    Timeouts from httpx/esperanto often have an empty message, which made
+    failures look like "Failed to generate embeddings: " with nothing after.
+    """
+    parts = [f"{type(e).__name__}: {e}" if str(e) else type(e).__name__]
+    cause = e.__cause__ or e.__context__
+    seen = {id(e)}
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        part = (
+            f"{type(cause).__name__}: {cause}" if str(cause) else type(cause).__name__
+        )
+        if part != parts[-1]:
+            parts.append(part)
+        cause = cause.__cause__ or cause.__context__
+    return " <- ".join(parts)
+
+
 async def mean_pool_embeddings(embeddings: List[List[float]]) -> List[float]:
     """
     Combine multiple embeddings into a single embedding using mean pooling.
@@ -178,23 +198,24 @@ async def generate_embeddings(
                 break
             except Exception as e:
                 cmd_context = f" (command: {command_id})" if command_id else ""
+                err = _describe_error(e)
                 if attempt < EMBEDDING_MAX_RETRIES:
                     logger.debug(
                         f"Embedding batch {batch_idx + 1}/{total_batches} "
                         f"attempt {attempt}/{EMBEDDING_MAX_RETRIES} failed "
-                        f"using model '{model_name}'{cmd_context}: {e}. Retrying..."
+                        f"using model '{model_name}'{cmd_context}: {err}. Retrying..."
                     )
                     await asyncio.sleep(EMBEDDING_RETRY_DELAY)
                 else:
                     logger.debug(
                         f"Embedding batch {batch_idx + 1}/{total_batches} "
                         f"failed after {EMBEDDING_MAX_RETRIES} attempts "
-                        f"using model '{model_name}'{cmd_context}: {e}"
+                        f"using model '{model_name}'{cmd_context}: {err}"
                     )
                     raise RuntimeError(
                         f"Failed to generate embeddings using model '{model_name}' "
                         f"(batch {batch_idx + 1}/{total_batches}, "
-                        f"{len(batch)} texts): {e}"
+                        f"{len(batch)} texts): {err}"
                     ) from e
 
     logger.debug(

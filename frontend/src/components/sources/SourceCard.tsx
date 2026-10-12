@@ -24,6 +24,7 @@ import {
   Loader2,
   Unlink
 } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useSourceStatus } from '@/lib/hooks/use-sources'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import type { TFunction } from 'i18next'
@@ -121,6 +122,7 @@ function SourceCardImpl({
   onContextModeChange
 }: SourceCardProps) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const statusConfigMap = getStatusConfig(t)
   
   // Only fetch status for sources that might have async processing
@@ -172,11 +174,13 @@ function SourceCardImpl({
         (currentStatusFromData === 'completed' || currentStatusFromData === 'failed')) {
       setWasProcessing(false) // Stop polling
 
+      // The list carries status too; refetch it so it doesn't keep 'running'
+      queryClient.invalidateQueries({ queryKey: ['sources'] })
       if (onRefresh) {
         setTimeout(() => onRefresh(), 500) // Small delay to ensure API is updated
       }
     }
-  }, [statusData, sourceWithStatus.status, wasProcessing, onRefresh, source.id])
+  }, [statusData, sourceWithStatus.status, wasProcessing, onRefresh, source.id, queryClient])
   
   const statusConfig = statusConfigMap[currentStatus] || statusConfigMap.completed
   const StatusIcon = statusConfig.icon

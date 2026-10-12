@@ -41,6 +41,7 @@ export interface SourceListResponse {
 export interface SourceDetailResponse extends SourceListResponse {
   full_text: string
   notebooks?: string[]  // List of notebook IDs this source is linked to
+  embed_command_id?: string | null  // Queued/running embed_source job, if any
 }
 
 export type SourceResponse = SourceDetailResponse
